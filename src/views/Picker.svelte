@@ -66,19 +66,27 @@
     if (c.kind === "image") return [{ key: "ocr", kind: "ocr", icon: "scan", label: t("qa.ocr"), sub: "Windows" }];
     if (c.kind !== "text") return [];
     const txt = c.text ?? "";
+    // Для подписей хватает начала текста: длинные тексты не пересчитываются на каждое нажатие стрелки.
+    const head = txt.slice(0, 1500);
     const out: Act[] = [];
     if (calcValue !== null) out.push({ key: "calc", kind: "calc", icon: "calc", label: "= " + calcValue.shown, sub: t("qa.calc"), arg: calcValue.raw });
-    const cyr = /[а-яё]/i.test(txt);
+    const cyr = /[а-яё]/i.test(head);
     const langs: ("ru" | "en" | "bg")[] = cyr ? ["en", "bg", "ru"] : ["ru", "bg"];
     for (const l of langs) out.push({ key: "tl-" + l, kind: "translate", icon: "globe", label: t("qa.translate", { lang: t(`qa.lang.${l}` as Key) }), sub: "MyMemory", arg: l });
     if (isUrl(txt)) out.push({ key: "short", kind: "shorten", icon: "link", label: t("qa.shorten"), sub: "clck.ru" });
     if (txt.length <= 1200) out.push({ key: "qr", kind: "qr", icon: "qr", label: t("qa.qr"), sub: t("qa.qrHint") });
     for (const id of transforms) {
-      if (id === "json" && formatJson(txt) === null) continue;
-      out.push({ key: "tr-" + id, kind: "tr", icon: "wand", label: t(`tr.${id}` as Key), sub: oneLine(apply(id, txt)).slice(0, 90), arg: id });
+      if (id === "json" && (txt.length > 500_000 || !/^\s*[[{]/.test(head) || formatJson(txt) === null)) continue;
+      out.push({ key: "tr-" + id, kind: "tr", icon: "wand", label: t(`tr.${id}` as Key), sub: oneLine(apply(id, head)).slice(0, 90), arg: id });
     }
     return out;
   });
+
+  async function loadHistory() {
+    try {
+      history = await api.history();
+    } catch {}
+  }
 
   async function load() {
     try {
@@ -122,14 +130,18 @@
       form = null;
       busy = false;
       opening++;
-      await load();
-      if (p.snippet) await openForm(p.snippet);
-      else {
+      // Окно сразу готово к вводу, свежие данные подтягиваются следом.
+      if (p.snippet) {
+        if (!snippets.some((x) => x.id === p.snippet)) await load();
+        await openForm(p.snippet);
+        load();
+      } else {
         await tick();
         input?.focus();
+        load();
       }
     }).then((o) => offs.push(o));
-    listen("history:changed", load).then((o) => offs.push(o));
+    listen("history:changed", loadHistory).then((o) => offs.push(o));
     listen("settings:changed", load).then((o) => offs.push(o));
     return () => offs.forEach((o) => o());
   });
@@ -375,10 +387,10 @@
     document.querySelector<HTMLElement>('.transforms [aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }
 
-  const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
+  const oneLine = (s: string) => s.slice(0, 300).replace(/\s+/g, " ").trim();
   const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
-  const isColor = (s?: string) => !!s && /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s.trim());
-  const isUrl = (s?: string) => !!s && /^https?:\/\/\S+$/.test(s.trim());
+  const isColor = (s?: string) => !!s && s.length < 40 && /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s.trim());
+  const isUrl = (s?: string) => !!s && s.length < 4096 && /^https?:\/\/\S+$/.test(s.trim());
   const enterLabel = $derived(enterPastes() ? t("hint.paste") : t("hint.copy"));
 </script>
 
@@ -603,7 +615,7 @@
 
   .group { position: relative; padding: 10px 8px 4px; font-size: var(--t-xs); color: var(--faint); }
 
-  .row { position: relative; width: 100%; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 8px; border-radius: var(--r-s); text-align: left; color: var(--text); transition: color 60ms linear; }
+  .row { position: relative; width: 100%; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 8px; border-radius: var(--r-s); text-align: left; color: var(--text); transition: color 60ms linear; content-visibility: auto; contain-intrinsic-size: auto 34px; }
   .row[aria-selected="true"] { color: var(--bg); }
   .row[aria-selected="true"] :is(.time, .num, .abbr, .dim, .glyph, .pinmark) { color: var(--on-text-muted); }
 

@@ -12,6 +12,12 @@ const POPUP_W: f64 = 760.0;
 const POPUP_H: f64 = 470.0;
 const PANEL_W: f64 = 420.0;
 
+/// Цвет окна до загрузки интерфейса: под тему, чтобы не мигало.
+fn bg(app: &AppHandle) -> tauri::window::Color {
+    let light = app.try_state::<AppState>().is_some_and(|s| s.settings.read().theme == "light");
+    if light { tauri::window::Color(244, 244, 242, 255) } else { tauri::window::Color(21, 21, 20, 255) }
+}
+
 pub fn picker(app: &AppHandle) -> Option<WebviewWindow> {
     if let Some(w) = app.get_webview_window(PICKER) {
         return Some(w);
@@ -26,7 +32,7 @@ pub fn picker(app: &AppHandle) -> Option<WebviewWindow> {
         .visible(false)
         .focused(true)
         .shadow(true)
-        .background_color(tauri::window::Color(21, 21, 20, 255))
+        .background_color(bg(app))
         .build()
         .ok()?;
     let handle = app.clone();
@@ -57,7 +63,7 @@ pub fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .visible(false)
         .center()
         .shadow(true)
-        .background_color(tauri::window::Color(21, 21, 20, 255))
+        .background_color(bg(app))
         .build()
         .ok()?;
     Some(w)
@@ -192,7 +198,7 @@ pub fn toggle_quick(app: &AppHandle) {
                 .skip_taskbar(true)
                 .visible(false)
                 .shadow(true)
-                .background_color(tauri::window::Color(21, 21, 20, 255))
+                .background_color(bg(app))
                 .build()
             else {
                 return;

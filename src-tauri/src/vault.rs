@@ -250,6 +250,14 @@ pub struct Vault {
     dir: PathBuf,
     dek: Key,
     pub data: Data,
+    /// Есть изменения, ещё не записанные на диск.
+    dirty: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Vault {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
 }
 
 pub fn now() -> i64 {
@@ -398,8 +406,8 @@ impl Vault {
             pin_guard: pw.guard,
         };
         write_header(dir, &header)?;
-        let v = Vault { dir: dir.to_path_buf(), dek, data: Data::default() };
-        v.save()?;
+        let v = Vault { dir: dir.to_path_buf(), dek, data: Data::default(), dirty: Default::default() };
+        v.save_now()?;
         Ok((v, words))
     }
 
@@ -493,12 +501,31 @@ impl Vault {
         } else {
             Data::default()
         };
-        let mut v = Vault { dir: dir.to_path_buf(), dek, data };
+        let mut v = Vault { dir: dir.to_path_buf(), dek, data, dirty: Default::default() };
         v.drain_inbox();
         Ok(v)
     }
 
+    /// Отмечает, что данные изменились. На диск они попадут в течение
+    /// секунды одной записью: при наборе текста и частых копированиях
+    /// файл не переписывается на каждое действие.
     pub fn save(&self) -> Result<(), VaultError> {
+        self.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Записывает отложенные изменения, если они есть.
+    pub fn flush(&self) -> Result<(), VaultError> {
+        if self.dirty.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if let Err(e) = self.save_now() {
+                self.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn save_now(&self) -> Result<(), VaultError> {
         let plain = Zeroizing::new(serde_json::to_vec(&self.data).map_err(|_| VaultError::Corrupt)?);
         write_atomic(&self.dir.join("data.bin"), &crypto::seal(&self.dek, b"data", &plain))?;
         Ok(())

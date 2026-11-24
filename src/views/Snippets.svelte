@@ -184,7 +184,7 @@
   .sortbar button:hover { color: var(--text); }
   .sortbar button[aria-checked="true"] { color: var(--text); background: var(--raise); }
   .items { overflow-y: auto; padding: 6px; flex: 1; min-height: 0; }
-  .item { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; text-align: left; padding: 9px 10px; border-radius: var(--r-s); }
+  .item { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; text-align: left; padding: 9px 10px; border-radius: var(--r-s); content-visibility: auto; contain-intrinsic-size: auto 52px; }
   .item:hover { background: var(--raise); }
   .item.on { background: var(--text); color: var(--bg); }
   .item.on .it-sub, .item.on .it-meta { color: var(--on-text-muted); }

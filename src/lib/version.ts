@@ -1,1 +1,4 @@
-export const VERSION = "0.4.2";
+export const VERSION = "0.4.3";
+
+/** Редакция политики и условий. Меняется, когда нужно заново спросить согласие. */
+export const LEGAL_VERSION = "2026-11-24.2";

@@ -203,6 +203,11 @@ pub async fn recover(app: AppHandle, words: Vec<String>, new_pin: String) -> R<V
 }
 
 #[tauri::command]
+pub fn vault_flush(state: State<AppState>) {
+    state.flush();
+}
+
+#[tauri::command]
 pub fn lock(app: AppHandle, state: State<AppState>) {
     state.lock(&app);
 }

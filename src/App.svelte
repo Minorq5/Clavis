@@ -3,21 +3,24 @@
   import { api, listen, type Status, type PickerMode } from "./lib/api";
   import { i18n } from "./lib/i18n.svelte";
   import Picker from "./views/Picker.svelte";
-  import Main from "./views/Main.svelte";
-  import Setup from "./views/Setup.svelte";
-  import Lock from "./views/Lock.svelte";
-  import Print from "./views/Print.svelte";
-  import Consent from "./views/Consent.svelte";
   import Quick from "./views/Quick.svelte";
   import { applyTheme } from "./lib/theme";
-  import { LEGAL_VERSION } from "./lib/legal";
+  import { LEGAL_VERSION } from "./lib/version";
   import type { Settings } from "./lib/api";
+
+  // Тяжёлые экраны грузятся только в своих окнах: окно вставки открывается мгновенно.
+  const loadMain = () => import("./views/Main.svelte");
+  const loadSetup = () => import("./views/Setup.svelte");
+  const loadLock = () => import("./views/Lock.svelte");
+  const loadPrint = () => import("./views/Print.svelte");
+  const loadConsent = () => import("./views/Consent.svelte");
 
   // Одно приложение обслуживает несколько окон. Какое это окно, говорит адрес.
   const hash = new URLSearchParams(location.hash.slice(1));
   const view = hash.get("view") ?? "main";
   const mode = (hash.get("mode") ?? "popup") as PickerMode;
-  const section = hash.get("section") ?? "snippets";
+  const lastSection = (() => { try { return localStorage.getItem("clavis.section"); } catch { return null; } })();
+  const section = hash.get("section") ?? lastSection ?? "notes";
 
   let status = $state<Status | null>(null);
   let settings = $state<Settings | null>(null);
@@ -48,19 +51,19 @@
 </script>
 
 {#if view === "print"}
-  <Print />
+  {#await loadPrint() then m}<m.default />{/await}
 {:else if needConsent}
-  <Consent onaccept={acceptLegal} updated={!!settings?.legalAccepted} />
+  {#await loadConsent() then m}<m.default onaccept={acceptLegal} updated={!!settings?.legalAccepted} />{/await}
 {:else if status}
   {#if view === "picker"}
     {#if status.stage === "ready"}<Picker initialMode={mode} />{/if}
   {:else if view === "quick"}
     <Quick />
   {:else if status.stage === "activate" || status.stage === "setup"}
-    <Setup stage={status.stage} ondone={refresh} />
+    {#await loadSetup() then m}<m.default stage={status.stage} ondone={refresh} />{/await}
   {:else if status.stage === "locked" || status.stage === "blocked"}
-    <Lock stage={status.stage} ondone={refresh} />
+    {#await loadLock() then m}<m.default stage={status.stage} ondone={refresh} />{/await}
   {:else}
-    <Main owner={status.owner} initial={section} />
+    {#await loadMain() then m}<m.default owner={status.owner} initial={section} />{/await}
   {/if}
 {/if}

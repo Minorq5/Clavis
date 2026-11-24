@@ -321,14 +321,35 @@
       },
       onUpdate: ({ editor: e }) => {
         checkSlash(e);
-        onchange(e.getJSON(), titleOf(e), e.getHTML());
+        scheduleChange();
       },
       onSelectionUpdate: ({ editor: e }) => { checkSlash(e); tickN++; },
       onTransaction: () => tickN++,
     });
   });
 
-  onDestroy(() => editor?.destroy());
+  // Документ целиком собирается не на каждое нажатие клавиши, а после короткой паузы:
+  // в длинных заметках с картинками это и давало подтормаживание при наборе.
+  let changeTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleChange() {
+    clearTimeout(changeTimer);
+    changeTimer = setTimeout(emitChange, 180);
+  }
+  function emitChange() {
+    if (changeTimer === undefined || !editor) return;
+    changeTimer = undefined;
+    const e = editor;
+    onchange(e.getJSON(), titleOf(e), "");
+  }
+  /** Отдаёт несохранённую правку сразу, не дожидаясь паузы. */
+  export function flushChange() {
+    if (changeTimer !== undefined) { clearTimeout(changeTimer); emitChange(); }
+  }
+
+  onDestroy(() => {
+    flushChange();
+    editor?.destroy();
+  });
 
   export function focusStart() {
     editor?.commands.focus("start");
@@ -340,6 +361,8 @@
 
   /** Заменяет содержимое (используется, когда личную заметку делают общей). */
   export function setContent(json: unknown) {
+    clearTimeout(changeTimer);
+    changeTimer = undefined;
     editor?.commands.setContent(json as object);
   }
 

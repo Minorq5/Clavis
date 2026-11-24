@@ -1,6 +1,6 @@
 //! Буфер обмена Windows: слежение, чтение и запись.
 
-use image::{imageops::FilterType, DynamicImage, ImageFormat};
+use image::{DynamicImage, ImageFormat};
 use std::io::Cursor;
 
 pub enum Content {
@@ -19,7 +19,8 @@ const MAX_TEXT_CHARS: usize = 2_000_000;
 
 pub fn thumbnail(img: &DynamicImage) -> String {
     use base64::Engine;
-    let t = img.resize(320, 200, FilterType::Triangle).to_rgb8();
+    // thumbnail() быстрее resize() на больших скриншотах, а для превью разницы не видно.
+    let t = img.thumbnail(320, 200).to_rgb8();
     let mut out = Cursor::new(Vec::new());
     let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 78);
     if enc.encode_image(&t).is_err() {
@@ -29,9 +30,15 @@ pub fn thumbnail(img: &DynamicImage) -> String {
 }
 
 pub fn png_from_image(img: &DynamicImage) -> Option<Vec<u8>> {
-    let mut out = Cursor::new(Vec::new());
-    img.write_to(&mut out, ImageFormat::Png).ok()?;
-    Some(out.into_inner())
+    use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+    use image::ImageEncoder;
+    // Быстрое сжатие: скриншот 4K сохраняется в разы быстрее, файл чуть больше.
+    let rgba = img.to_rgba8();
+    let mut out = Vec::new();
+    PngEncoder::new_with_quality(&mut out, CompressionType::Fast, PngFilter::Adaptive)
+        .write_image(&rgba, rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(out)
 }
 
 #[cfg(windows)]

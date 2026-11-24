@@ -134,6 +134,13 @@ impl AppState {
         v.as_ref()?.data.snippets.iter().find(|s| s.id == id).map(|s| s.body.clone())
     }
 
+    /// Немедленно записывает отложенные изменения хранилища.
+    pub fn flush(&self) {
+        if let Some(v) = self.vault.lock().as_ref() {
+            let _ = v.flush();
+        }
+    }
+
     pub fn lock(&self, app: &AppHandle) {
         self.lock_with(app, "lock");
     }

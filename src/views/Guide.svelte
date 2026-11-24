@@ -124,8 +124,8 @@
   <section>
     <h2>{L("Поиск везде", "Search everything")}</h2>
     <p class="text">{L(
-      "Ctrl+K в главном окне ищет сразу по заметкам, сниппетам и истории. Enter открывает найденное, а запись истории копирует.",
-      "Ctrl+K in the main window searches notes, snippets and history at once. Enter opens the result; a history entry is copied.",
+      "Ctrl+K в главном окне ищет сразу по заметкам, сниппетам и истории. Enter открывает найденное, а запись истории копирует. Ctrl+F ищет в списке открытого раздела.",
+      "Ctrl+K in the main window searches notes, snippets and history at once. Enter opens the result; a history entry is copied. Ctrl+F searches the list of the open section.",
     )}</p>
   </section>
 

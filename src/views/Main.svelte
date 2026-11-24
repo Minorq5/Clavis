@@ -28,6 +28,11 @@
 
   // svelte-ignore state_referenced_locally
   nav.section = (["snippets", "notes", "settings", "guide", "owner"].includes(initial) ? initial : "snippets") as Section;
+  // Следующий запуск откроет тот раздел, где вы работали.
+  $effect(() => {
+    const sec = nav.section;
+    if (sec === "notes" || sec === "snippets") try { localStorage.setItem("clavis.section", sec); } catch {}
+  });
   const section = $derived(nav.section);
   let palette = $state(false);
   let starOpen = $state(false);
@@ -206,7 +211,15 @@
 {#if starOpen}<StarPrompt onclose={() => (starOpen = false)} />{/if}
 {#if palette}<Palette {owner} onclose={() => (palette = false)} />{/if}
 
-<svelte:window onkeydown={(e) => { if ((e.ctrlKey || e.metaKey) && e.code === "KeyK") { e.preventDefault(); palette = !palette; } }} />
+<svelte:window onkeydown={(e) => {
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (ctrl && e.code === "KeyK") { e.preventDefault(); palette = !palette; return; }
+  // Ctrl+F: поиск по списку текущего раздела (в тексте заметки не перехватываем).
+  if (ctrl && e.code === "KeyF" && !(e.target as HTMLElement)?.closest?.(".ProseMirror")) {
+    const box = [...document.querySelectorAll<HTMLInputElement>(".searchbox input")].find((x) => x.offsetParent);
+    if (box) { e.preventDefault(); box.focus(); box.select(); }
+  }
+}} />
 
 <style>
   .shell { display: grid; grid-template-columns: 208px 1fr; height: 100%; }

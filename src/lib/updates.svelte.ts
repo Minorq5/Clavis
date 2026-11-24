@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 // Автообновление: Clavis сам спрашивает у сервера, нет ли новой версии, и ставит её по согласию.
 import { inTauri } from "./api";
 
@@ -20,11 +21,14 @@ export async function checkUpdates(): Promise<boolean> {
       notes: u.body ?? "",
       install: async (onProgress) => {
         let total = 0, got = 0;
-        await u.downloadAndInstall((e) => {
+        await u.download((e) => {
           if (e.event === "Started") total = e.data.contentLength ?? 0;
           else if (e.event === "Progress") { got += e.data.chunkLength; if (total) onProgress(Math.min(99, Math.round((got / total) * 100))); }
           else if (e.event === "Finished") onProgress(100);
         });
+        // Установщик закрывает Clavis: сначала записываем всё несохранённое.
+        try { await invoke("vault_flush"); } catch {}
+        await u.install();
         const { relaunch } = await import("@tauri-apps/plugin-process");
         await relaunch();
       },

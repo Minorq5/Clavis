@@ -264,6 +264,7 @@
   }
 
   async function flush() {
+    ed?.flushChange();
     clearTimeout(timer);
     if (!pending || current?.kind !== "personal") return;
     const { doc: d, title } = pending;
@@ -1163,7 +1164,7 @@
   .mini:hover { color: var(--text); background: var(--raise); }
   .hintline { color: var(--faint); font-size: var(--t-s); line-height: 1.5; padding: 8px 10px; margin: 0; }
 
-  .item { position: relative; width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; text-align: left; padding: 8px 10px; border-radius: var(--r-s); transition: background 90ms var(--ease); cursor: default; }
+  .item { position: relative; width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; text-align: left; padding: 8px 10px; border-radius: var(--r-s); transition: background 90ms var(--ease); cursor: default; content-visibility: auto; contain-intrinsic-size: auto 56px; }
   .item:hover { background: var(--raise); }
   .item:focus-visible { outline: 1px solid var(--muted); outline-offset: -1px; }
   .item.on { background: var(--text); color: var(--bg); }

@@ -68,7 +68,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "open" => ui::show_main(app, None),
             "history" => ui::toggle_picker(app),
             "lock" => app.state::<AppState>().lock(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                app.state::<AppState>().flush();
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, e| {
@@ -99,6 +102,19 @@ pub fn run() {
             let shared = shared::Shared::start(handle.clone());
             let state = AppState::init(dir, shared).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
             app.manage(state);
+            // Отложенные изменения хранилища пишутся на диск раз в 0,7 с.
+            {
+                let h = handle.clone();
+                std::thread::Builder::new()
+                    .name("vault-flush".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_millis(700));
+                        if let Some(st) = h.try_state::<AppState>() {
+                            st.flush();
+                        }
+                    })
+                    .ok();
+            }
 
             let st = handle.state::<AppState>();
             let (hotkey, quick, autostart) = {
@@ -148,6 +164,16 @@ pub fn run() {
             let stage = st.stage();
             if !(hidden && (stage == "locked" || stage == "ready")) {
                 ui::show_main(&handle, None);
+            } else {
+                // Главное окно готовится заранее и скрыто, чтобы открывалось сразу.
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    let h2 = h.clone();
+                    let _ = h.run_on_main_thread(move || {
+                        ui::main_window(&h2);
+                    });
+                });
             }
             Ok(())
         })
@@ -160,6 +186,7 @@ pub fn run() {
             commands::unlock,
             commands::recover,
             commands::lock,
+            commands::vault_flush,
             commands::history_list,
             commands::history_pin,
             commands::history_delete,

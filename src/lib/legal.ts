@@ -5,7 +5,7 @@ import termsRu from "../../docs/legal/terms.ru.md?raw";
 import termsEn from "../../docs/legal/terms.en.md?raw";
 
 /** Меняется вместе с редакцией документов: новая версия снова спрашивает согласие. */
-export const LEGAL_VERSION = "2026-11-24.2";
+export { LEGAL_VERSION } from "./version";
 
 export type LegalDoc = "privacy" | "terms";
 
