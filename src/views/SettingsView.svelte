@@ -296,7 +296,7 @@
           <small class:bad={!!updates.error}>
             {#if updates.progress !== null}{t("upd.installing", { p: updates.progress })}
             {:else if updates.checking}{t("set.checking")}
-            {:else if updates.error}{t("upd.failed", { e: updates.error })}
+            {:else if updates.error}{(/release JSON|fetch|network|timed? ?out|connect|dns/i).test(updates.error) ? t("upd.unreachable") : t("upd.failed", { e: updates.error })}
             {:else if updates.found}{t("upd.available", { v: updates.found.version })}
             {:else if checkedNow || updates.checked}{t("set.upToDate")}
             {:else}{inTauri ? t("set.updatesHelp") : ""}{/if}

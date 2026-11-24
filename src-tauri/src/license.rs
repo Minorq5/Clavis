@@ -280,6 +280,13 @@ impl License {
             }
         } else if v.get("revoked").and_then(Value::as_bool) == Some(true) && self.store.license.is_some() {
             self.store.revoked = true;
+        } else if let (Some(lic), Some(sig)) = (v.get("license").and_then(Value::as_str), v.get("licenseSig").and_then(Value::as_str)) {
+            // Новая лицензия принимается, только если подпись сервера верна и она выдана этому устройству.
+            let (old_l, old_s) = (self.store.license.replace(lic.to_string()), self.store.license_sig.replace(sig.to_string()));
+            if self.verified().is_none() {
+                self.store.license = old_l;
+                self.store.license_sig = old_s;
+            }
         }
         self.save();
     }

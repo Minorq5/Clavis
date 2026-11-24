@@ -428,9 +428,10 @@ async function handle(req: Request): Promise<Response> {
       });
       if (error) return json({ ok: false, error: "device_exists" }, 409);
 
+      // Новый код владельца передаёт права этому компьютеру. Такие коды создаются только вручную в базе.
       let owner = false;
       if (claimed.is_owner) {
-        const { error: ownErr } = await db.from("owner").insert({ id: 1, pubkey });
+        const { error: ownErr } = await db.from("owner").upsert({ id: 1, pubkey });
         owner = !ownErr;
       }
       await db.from("hw_attempts").update({ failures: 0 }).eq("hw_hash", p.hw);
@@ -451,10 +452,14 @@ async function handle(req: Request): Promise<Response> {
     }
 
     case "check": {
-      const { data } = await db.from("devices").select("id, revoked").eq("pubkey", pubkey).maybeSingle();
+      const { data } = await db.from("devices").select("id, revoked, hw_hash").eq("pubkey", pubkey).maybeSingle();
       if (!data) return json({ ok: false, revoked: true });
-      if (!data.revoked) await db.from("devices").update({ last_seen: new Date().toISOString(), last_ip: ip }).eq("id", data.id);
-      return json({ ok: !data.revoked, revoked: data.revoked, owner: await isOwner(pubkey) });
+      if (data.revoked) return json({ ok: false, revoked: true, owner: false });
+      await db.from("devices").update({ last_seen: new Date().toISOString(), last_ip: ip }).eq("id", data.id);
+      // Свежая лицензия: так устройство узнаёт, что стало владельцем или перестало им быть.
+      const owner = await isOwner(pubkey);
+      const license = JSON.stringify({ pubkey, hw: data.hw_hash, owner, iat: Date.now() });
+      return json({ ok: true, revoked: false, owner, license, licenseSig: await sign(license) });
     }
 
     case "owner": {
