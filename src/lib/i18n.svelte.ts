@@ -148,6 +148,8 @@ const ru = {
   "setup.done": "Начать работу",
 
   "lock.title": "Clavis заблокирован",
+  "lock.tpmLocked": "Слишком много неверных PIN подряд, и чип TPM временно не принимает попытки. Подождите 10–15 минут или войдите фразой восстановления.",
+  "lock.guardMissing": "Ключ PIN в чипе TPM недоступен: возможно, TPM сбросили. Откройте Clavis фразой восстановления и задайте PIN заново.",
   "lock.pin": "PIN-код",
   "lock.go": "Открыть",
   "lock.wrong": "Неверный PIN. Осталось попыток: {n}.",
@@ -639,6 +641,8 @@ const en: Dict = {
   "setup.ctrlHelp": "You can change these later.",
   "setup.done": "Start",
   "lock.title": "Clavis is locked",
+  "lock.tpmLocked": "Too many wrong PINs in a row, so the TPM chip is not accepting attempts for now. Wait 10–15 minutes or use your recovery phrase.",
+  "lock.guardMissing": "The PIN key in the TPM chip is unavailable, possibly because the TPM was reset. Open Clavis with your recovery phrase and set a new PIN.",
   "lock.pin": "PIN",
   "lock.go": "Open",
   "lock.wrong": "Wrong PIN. Attempts left: {n}.",

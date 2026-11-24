@@ -31,6 +31,10 @@ pub enum VaultError {
     WrongPhrase,
     #[error("файл повреждён")]
     Corrupt,
+    #[error("TPM временно блокирует ввод PIN после неверных попыток")]
+    TpmLocked,
+    #[error("ключ PIN в TPM недоступен, нужна фраза восстановления")]
+    GuardMissing,
     #[error("ошибка диска: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -53,6 +57,17 @@ pub struct Header {
     /// DEK, обёрнутый ключом из подписи Windows Hello и секрета устройства.
     #[serde(default)]
     pub hello_wrap: Option<String>,
+    /// Ключ в TPM, без которого PIN не открывает хранилище.
+    #[serde(default)]
+    pub pin_guard: Option<PinGuard>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PinGuard {
+    /// Имя ключа в TPM.
+    pub key: String,
+    /// Случайный секрет, зашифрованный этим ключом.
+    pub wrap: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -271,12 +286,50 @@ fn write_header(dir: &Path, h: &Header) -> Result<(), VaultError> {
     Ok(())
 }
 
-fn pin_kek(pin: &str, salt: &[u8], device_secret: &[u8]) -> Result<Key, VaultError> {
-    let stretched = crypto::stretch(pin.as_bytes(), salt).map_err(|_| VaultError::Corrupt)?;
-    let mut ikm = Zeroizing::new(Vec::with_capacity(64));
-    ikm.extend_from_slice(stretched.as_ref());
+fn stretch_pin(pin: &str, salt: &[u8]) -> Result<Key, VaultError> {
+    crypto::stretch(pin.as_bytes(), salt).map_err(|_| VaultError::Corrupt)
+}
+
+/// Ключ PIN. Если есть секрет из TPM, без него ключ не получить.
+fn pin_kek(stretched: &[u8], device_secret: &[u8], guard: Option<&[u8]>) -> Key {
+    let mut ikm = Zeroizing::new(Vec::with_capacity(96));
+    ikm.extend_from_slice(stretched);
     ikm.extend_from_slice(device_secret);
-    Ok(crypto::derive(&ikm, "pin-kek"))
+    match guard {
+        Some(g) => {
+            ikm.extend_from_slice(g);
+            crypto::derive(&ikm, "pin-kek-2")
+        }
+        None => crypto::derive(&ikm, "pin-kek"),
+    }
+}
+
+/// Значение, которое TPM проверяет при каждом использовании ключа PIN.
+fn guard_auth(stretched: &[u8]) -> Zeroizing<String> {
+    let k = crypto::derive(stretched, "pin-guard-auth");
+    Zeroizing::new(k.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+struct PinWrap {
+    salt: String,
+    wrap: String,
+    guard: Option<PinGuard>,
+}
+
+/// Оборачивает DEK под новый PIN. На компьютере с TPM добавляет ключ-страж:
+/// неверные попытки считает чип, и откат файлов счётчик не сбрасывает.
+fn wrap_for_pin(pin: &str, device_secret: &[u8], dek: &Key) -> Result<PinWrap, VaultError> {
+    let salt = crypto::random::<16>();
+    let stretched = stretch_pin(pin, &salt)?;
+    let name = format!("Clavis PIN {}", crypto::random::<8>().iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let secret = Zeroizing::new(crypto::random::<32>());
+    let sealed = crate::device::guard_create(&name, &guard_auth(stretched.as_ref()), secret.as_ref());
+    let kek = pin_kek(stretched.as_ref(), device_secret, sealed.as_ref().map(|_| secret.as_ref() as &[u8]));
+    Ok(PinWrap {
+        salt: B64.encode(salt),
+        wrap: B64.encode(crypto::seal(&kek, b"dek", dek.as_ref())),
+        guard: sealed.map(|w| PinGuard { key: name, wrap: B64.encode(w) }),
+    })
 }
 
 fn hello_kek(signature: &[u8], device_secret: &[u8]) -> Key {
@@ -322,20 +375,19 @@ impl Vault {
         let _ = fs::remove_file(dir.join("data.bin"));
 
         let dek = crypto::random_key();
-        let pin_salt = crypto::random::<16>();
         let rec_salt = crypto::random::<16>();
         let entropy = Zeroizing::new(crypto::random::<32>());
         let mnemonic = bip39::Mnemonic::from_entropy(entropy.as_ref()).map_err(|_| VaultError::Corrupt)?;
         let words: Vec<String> = mnemonic.words().map(String::from).collect();
 
-        let pkek = pin_kek(pin, &pin_salt, device_secret)?;
+        let pw = wrap_for_pin(pin, device_secret, &dek)?;
         let rkek = rec_kek(entropy.as_ref(), &rec_salt)?;
         let (inbox_sk, inbox_pk) = sealed_box::keypair();
 
         let header = Header {
             version: 1,
-            pin_salt: B64.encode(pin_salt),
-            pin_wrap: Some(B64.encode(crypto::seal(&pkek, b"dek", dek.as_ref()))),
+            pin_salt: pw.salt,
+            pin_wrap: Some(pw.wrap),
             rec_salt: B64.encode(rec_salt),
             rec_wrap: B64.encode(crypto::seal(&rkek, b"dek", dek.as_ref())),
             pin_failures: 0,
@@ -343,6 +395,7 @@ impl Vault {
             inbox_pk: B64.encode(inbox_pk),
             inbox_sk: B64.encode(crypto::seal(&dek, b"inbox-sk", inbox_sk.as_ref())),
             hello_wrap: None,
+            pin_guard: pw.guard,
         };
         write_header(dir, &header)?;
         let v = Vault { dir: dir.to_path_buf(), dek, data: Data::default() };
@@ -362,12 +415,39 @@ impl Vault {
             return Err((VaultError::PinDisabled, 0));
         };
         let salt = b64d(&h.pin_salt).map_err(|e| (e, 0))?;
-        let kek = pin_kek(pin, &salt, device_secret).map_err(|e| (e, 0))?;
-        match unwrap_dek(&kek, &wrap) {
+        let stretched = stretch_pin(pin, &salt).map_err(|e| (e, 0))?;
+        let left_now = MAX_PIN_FAILURES.saturating_sub(h.pin_failures);
+        let kek = match &h.pin_guard {
+            Some(g) => {
+                let sealed = b64d(&g.wrap).map_err(|e| (e, 0))?;
+                match crate::device::guard_open(&g.key, &guard_auth(stretched.as_ref()), &sealed) {
+                    Ok(secret) => Some(pin_kek(stretched.as_ref(), device_secret, Some(&secret))),
+                    Err(crate::device::GuardError::Locked) => return Err((VaultError::TpmLocked, left_now)),
+                    Err(crate::device::GuardError::Missing) => return Err((VaultError::GuardMissing, 0)),
+                    Err(crate::device::GuardError::Failed) => None,
+                }
+            }
+            None => Some(pin_kek(stretched.as_ref(), device_secret, None)),
+        };
+        match kek.and_then(|k| unwrap_dek(&k, &wrap)) {
             Some(dek) => {
-                if h.pin_failures != 0 {
-                    h.pin_failures = 0;
-                    let _ = write_header(dir, &h);
+                let mut dirty = h.pin_failures != 0;
+                h.pin_failures = 0;
+                // Хранилища со старых версий получают ключ в TPM при первом входе.
+                let mut fresh = None;
+                if h.pin_guard.is_none() {
+                    if let Ok(PinWrap { salt, wrap, guard: Some(g) }) = wrap_for_pin(pin, device_secret, &dek) {
+                        fresh = Some(g.key.clone());
+                        h.pin_salt = salt;
+                        h.pin_wrap = Some(wrap);
+                        h.pin_guard = Some(g);
+                        dirty = true;
+                    }
+                }
+                if dirty && write_header(dir, &h).is_err() {
+                    if let Some(k) = fresh {
+                        crate::device::guard_delete(&k);
+                    }
                 }
                 let v = Vault::load(dir, dek).map_err(|e| (e, MAX_PIN_FAILURES))?;
                 Ok(v)
@@ -392,12 +472,15 @@ impl Vault {
         let entropy = Zeroizing::new(mnemonic.to_entropy());
         let rkek = rec_kek(&entropy, &b64d(&h.rec_salt)?)?;
         let dek = unwrap_dek(&rkek, &h.rec_wrap).ok_or(VaultError::WrongPhrase)?;
-        let pin_salt = crypto::random::<16>();
-        let pkek = pin_kek(new_pin, &pin_salt, device_secret)?;
-        h.pin_salt = B64.encode(pin_salt);
-        h.pin_wrap = Some(B64.encode(crypto::seal(&pkek, b"dek", dek.as_ref())));
+        let pw = wrap_for_pin(new_pin, device_secret, &dek)?;
+        let old = std::mem::replace(&mut h.pin_guard, pw.guard);
+        h.pin_salt = pw.salt;
+        h.pin_wrap = Some(pw.wrap);
         h.pin_failures = 0;
         write_header(dir, &h)?;
+        if let Some(g) = old {
+            crate::device::guard_delete(&g.key);
+        }
         Vault::load(dir, dek)
     }
 
@@ -798,6 +881,31 @@ mod tests {
         let v = Vault::unlock(&dir, "0000", &secret).ok().unwrap();
         let texts: Vec<_> = v.data.history.iter().map(|h| h.text.clone().unwrap()).collect();
         assert_eq!(texts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn pin_guard_and_upgrade() {
+        let dir = tmp();
+        let secret = [7u8; 32];
+        let (v, _) = Vault::create(&dir, "1357", &secret).unwrap();
+        drop(v);
+        let h = read_header(&dir).unwrap();
+        assert!(h.pin_guard.is_some());
+        assert!(matches!(Vault::unlock(&dir, "0000", &secret), Err((VaultError::WrongPin, 9))));
+        assert!(Vault::unlock(&dir, "1357", &secret).is_ok());
+        // Хранилище старого формата: PIN без ключа в TPM.
+        let mut old = read_header(&dir).unwrap();
+        let v = Vault::unlock(&dir, "1357", &secret).ok().unwrap();
+        let salt = crypto::random::<16>();
+        let st = stretch_pin("1357", &salt).unwrap();
+        old.pin_salt = B64.encode(salt);
+        old.pin_wrap = Some(B64.encode(crypto::seal(&pin_kek(st.as_ref(), &secret, None), b"dek", v.dek.as_ref())));
+        old.pin_guard = None;
+        write_header(&dir, &old).unwrap();
+        drop(v);
+        assert!(Vault::unlock(&dir, "1357", &secret).is_ok());
+        assert!(read_header(&dir).unwrap().pin_guard.is_some());
+        assert!(Vault::unlock(&dir, "1357", &secret).is_ok());
     }
 
     #[test]

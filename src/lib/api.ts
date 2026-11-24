@@ -105,7 +105,7 @@ export const api = {
   requestAccess: (name: string, message: string) => call<void>("request_access", { name, message }),
   setPin: (pin: string) => call<string[]>("set_pin", { pin }),
   confirmRecovery: () => call<void>("confirm_recovery"),
-  unlock: (pin: string) => call<{ ok: boolean; attemptsLeft: number }>("unlock", { pin }),
+  unlock: (pin: string) => call<{ ok: boolean; attemptsLeft: number; reason?: "tpm_locked" | "guard_missing" }>("unlock", { pin }),
   recover: (words: string[], newPin: string) => call<{ ok: boolean }>("recover", { words, newPin }),
   lock: () => call<void>("lock"),
 

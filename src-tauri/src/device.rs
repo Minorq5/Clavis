@@ -50,6 +50,33 @@ pub fn machine_name() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into())
 }
 
+/// Почему не удалось открыть ключ PIN в TPM.
+#[derive(Debug, PartialEq)]
+pub enum GuardError {
+    /// TPM временно блокирует попытки после серии неверных PIN.
+    Locked,
+    /// Ключа больше нет (TPM очищен или ключ удалён).
+    Missing,
+    /// Неверный PIN или другая ошибка.
+    Failed,
+}
+
+/// Создаёт в TPM ключ, которым можно пользоваться только с `auth`, и
+/// шифрует им `secret`. Неверные попытки считает сам чип и после серии
+/// ошибок блокирует ключ на время, поэтому подбор PIN по копии файлов
+/// упирается в TPM. Перед возвратом проверяет, что расшифровка работает.
+pub fn guard_create(name: &str, auth: &str, secret: &[u8]) -> Option<Vec<u8>> {
+    imp::guard_create(name, auth, secret)
+}
+
+pub fn guard_open(name: &str, auth: &str, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, GuardError> {
+    imp::guard_open(name, auth, wrapped)
+}
+
+pub fn guard_delete(name: &str) {
+    imp::guard_delete(name)
+}
+
 #[cfg(windows)]
 mod imp {
     use windows::core::{w, PCWSTR};
@@ -57,6 +84,7 @@ mod imp {
     use windows::Win32::Security::Cryptography::*;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     use windows::Win32::System::SystemInformation::{GetSystemFirmwareTable, FIRMWARE_TABLE_PROVIDER};
+    use super::GuardError;
     use zeroize::Zeroizing;
 
     const KEY_NAME: PCWSTR = w!("Clavis Device Key");
@@ -153,6 +181,103 @@ mod imp {
         }
     }
 
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    fn provider() -> Option<(NCRYPT_PROV_HANDLE, Handle)> {
+        unsafe {
+            let mut prov = NCRYPT_PROV_HANDLE::default();
+            NCryptOpenStorageProvider(&mut prov, MS_PLATFORM_CRYPTO_PROVIDER, 0).ok()?;
+            Some((prov, Handle(NCRYPT_HANDLE(prov.0))))
+        }
+    }
+
+    unsafe fn set_auth(key: NCRYPT_KEY_HANDLE, auth: &str) -> bool {
+        let w = Zeroizing::new(wide(auth));
+        let bytes = std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * 2);
+        NCryptSetProperty(NCRYPT_HANDLE(key.0), NCRYPT_PIN_PROPERTY, bytes, NCRYPT_FLAGS(0)).is_ok()
+    }
+
+    fn classify(e: &windows::core::Error) -> GuardError {
+        match e.code().0 as u32 {
+            // TPM_20_E_LOCKOUT, TPM_E_DEFEND_LOCK_RUNNING, TPM_20_E_RETRY
+            0x8028_0921 | 0x8028_0803 | 0x8028_0922 => GuardError::Locked,
+            // NTE_BAD_KEYSET, NTE_NO_KEY
+            0x8009_0016 | 0x8009_000D => GuardError::Missing,
+            _ => GuardError::Failed,
+        }
+    }
+
+    pub fn guard_create(name: &str, auth: &str, secret: &[u8]) -> Option<Vec<u8>> {
+        let ct = unsafe {
+            let (prov, _p) = provider()?;
+            let wname = wide(name);
+            let mut key = NCRYPT_KEY_HANDLE::default();
+            NCryptCreatePersistedKey(prov, &mut key, BCRYPT_RSA_ALGORITHM, PCWSTR(wname.as_ptr()), CERT_KEY_SPEC(0), NCRYPT_OVERWRITE_KEY_FLAG).ok()?;
+            if !set_auth(key, auth) || NCryptFinalizeKey(key, NCRYPT_SILENT_FLAG).is_err() {
+                if NCryptDeleteKey(key, NCRYPT_SILENT_FLAG.0).is_err() {
+                    let _ = NCryptFreeObject(NCRYPT_HANDLE(key.0));
+                }
+                return None;
+            }
+            let _k = Handle(NCRYPT_HANDLE(key.0));
+            let pad = oaep();
+            let mut size = 0u32;
+            let mut out = Vec::new();
+            let ok = NCryptEncrypt(key, Some(secret), Some(&pad as *const _ as *const _), None, &mut size, NCRYPT_PAD_OAEP_FLAG).is_ok() && {
+                out = vec![0u8; size as usize];
+                NCryptEncrypt(key, Some(secret), Some(&pad as *const _ as *const _), Some(&mut out), &mut size, NCRYPT_PAD_OAEP_FLAG).is_ok()
+            };
+            if !ok {
+                drop(_k);
+                guard_delete(name);
+                return None;
+            }
+            out.truncate(size as usize);
+            out
+        };
+        // Самопроверка через новый дескриптор, как при настоящем входе.
+        match guard_open(name, auth, &ct) {
+            Ok(back) if back.as_slice() == secret => Some(ct),
+            _ => {
+                guard_delete(name);
+                None
+            }
+        }
+    }
+
+    pub fn guard_open(name: &str, auth: &str, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, GuardError> {
+        unsafe {
+            let (prov, _p) = provider().ok_or(GuardError::Failed)?;
+            let wname = wide(name);
+            let mut key = NCRYPT_KEY_HANDLE::default();
+            NCryptOpenKey(prov, &mut key, PCWSTR(wname.as_ptr()), CERT_KEY_SPEC(0), NCRYPT_SILENT_FLAG).map_err(|e| classify(&e))?;
+            let _k = Handle(NCRYPT_HANDLE(key.0));
+            if !set_auth(key, auth) {
+                return Err(GuardError::Failed);
+            }
+            let pad = oaep();
+            let mut size = 0u32;
+            NCryptDecrypt(key, Some(wrapped), Some(&pad as *const _ as *const _), None, &mut size, NCRYPT_PAD_OAEP_FLAG | NCRYPT_SILENT_FLAG).map_err(|e| classify(&e))?;
+            let mut out = Zeroizing::new(vec![0u8; size as usize]);
+            NCryptDecrypt(key, Some(wrapped), Some(&pad as *const _ as *const _), Some(&mut out), &mut size, NCRYPT_PAD_OAEP_FLAG | NCRYPT_SILENT_FLAG).map_err(|e| classify(&e))?;
+            out.truncate(size as usize);
+            Ok(out)
+        }
+    }
+
+    pub fn guard_delete(name: &str) {
+        unsafe {
+            let Some((prov, _p)) = provider() else { return };
+            let wname = wide(name);
+            let mut key = NCRYPT_KEY_HANDLE::default();
+            if NCryptOpenKey(prov, &mut key, PCWSTR(wname.as_ptr()), CERT_KEY_SPEC(0), NCRYPT_SILENT_FLAG).is_ok() && NCryptDeleteKey(key, NCRYPT_SILENT_FLAG.0).is_err() {
+                let _ = NCryptFreeObject(NCRYPT_HANDLE(key.0));
+            }
+        }
+    }
+
     /// UUID системы из таблицы SMBIOS (структура типа 1), иначе MachineGuid.
     pub fn hardware_id() -> String {
         smbios_uuid().or_else(machine_guid).unwrap_or_else(|| "unknown".into())
@@ -231,4 +356,24 @@ mod imp {
     pub fn tpm_encrypt(_: &[u8]) -> Option<Vec<u8>> { None }
     pub fn tpm_decrypt(_: &[u8]) -> Option<Zeroizing<Vec<u8>>> { None }
     pub fn hardware_id() -> String { "test-machine".into() }
+
+    use super::GuardError;
+
+    // В тестах TPM изображает простая проверка: шифротекст хранит хэш auth.
+    #[cfg(test)]
+    pub fn guard_create(_: &str, auth: &str, secret: &[u8]) -> Option<Vec<u8>> {
+        let mut v = crate::crypto::sha256_hex(auth.as_bytes()).into_bytes();
+        v.extend_from_slice(secret);
+        Some(v)
+    }
+    #[cfg(test)]
+    pub fn guard_open(_: &str, auth: &str, w: &[u8]) -> Result<Zeroizing<Vec<u8>>, GuardError> {
+        let h = crate::crypto::sha256_hex(auth.as_bytes()).into_bytes();
+        if w.len() > h.len() && w[..h.len()] == h[..] { Ok(Zeroizing::new(w[h.len()..].to_vec())) } else { Err(GuardError::Failed) }
+    }
+    #[cfg(not(test))]
+    pub fn guard_create(_: &str, _: &str, _: &[u8]) -> Option<Vec<u8>> { None }
+    #[cfg(not(test))]
+    pub fn guard_open(_: &str, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, GuardError> { Err(GuardError::Missing) }
+    pub fn guard_delete(_: &str) {}
 }

@@ -18,7 +18,7 @@ use base64::{engine::general_purpose::STANDARD as B64, engine::general_purpose::
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +32,8 @@ const INVITE_PREFIX: &str = "clavis:join/";
 pub struct Shared {
     rt: Realtime,
     open: Mutex<HashSet<String>>,
+    /// Канал Realtime каждого открытого документа.
+    topics: Mutex<HashMap<String, String>>,
     flush_now: Arc<AtomicBool>,
 }
 
@@ -88,8 +90,37 @@ fn err(e: LicenseError) -> String {
     }
 }
 
-fn topic(id: &str) -> String {
-    format!("doc:{id}")
+/// Имя канала выводится из ключа документа: без ключа канал не найти,
+/// а после смены ключа (удаления участника) канал тоже меняется.
+fn topic(doc: &SharedLocal) -> Option<String> {
+    let key = key_for(doc, doc.epoch)?;
+    let tag = crypto::derive(key.as_ref(), &format!("clavis/topic/{}/{}", doc.id, doc.epoch));
+    Some(format!("d{}", tag[..16].iter().map(|b| format!("{b:02x}")).collect::<String>()))
+}
+
+/// Подключается к каналу текущей эпохи, если документ открыт.
+fn sync_topic(state: &AppState, id: &str) {
+    let want = if state.shared.open.lock().contains(id) { local(state, id).ok().and_then(|d| topic(&d)) } else { None };
+    let mut topics = state.shared.topics.lock();
+    let have = topics.get(id).cloned();
+    if have == want {
+        return;
+    }
+    if let Some(t) = have {
+        state.shared.rt.leave(&t);
+        topics.remove(id);
+    }
+    if let Some(t) = want {
+        state.shared.rt.join(&t);
+        topics.insert(id.to_string(), t);
+    }
+}
+
+fn send(state: &AppState, id: &str, event: &str, payload: Value) {
+    let t = state.shared.topics.lock().get(id).cloned();
+    if let Some(t) = t {
+        state.shared.rt.send(&t, event, payload);
+    }
 }
 
 fn valid_uuid(id: &str) -> bool {
@@ -122,7 +153,7 @@ impl Shared {
         let handle = app.clone();
         let rt = Realtime::start(move |ev| on_realtime(&handle, ev));
         let flush_now = Arc::new(AtomicBool::new(false));
-        let shared = Shared { rt, open: Mutex::new(HashSet::new()), flush_now: flush_now.clone() };
+        let shared = Shared { rt, open: Mutex::new(HashSet::new()), topics: Mutex::new(HashMap::new()), flush_now: flush_now.clone() };
 
         // Отправка накопленных правок и периодическая сверка с сервером.
         let h = app.clone();
@@ -448,6 +479,7 @@ pub fn pull_and_emit(app: &AppHandle, id: &str) -> R<()> {
         }
         Err(e) => return Err(e),
     };
+    sync_topic(&app.state::<AppState>(), id);
     if !fresh.is_empty() {
         if let Some(m) = merge(&fresh) {
             let _ = app.emit("shared:update", json!({ "id": id, "data": B64.encode(m) }));
@@ -467,10 +499,11 @@ pub fn open(app: &AppHandle, id: &str) -> R<Opened> {
     let state = app.state::<AppState>();
     let doc = local(&state, id)?;
     state.shared.open.lock().insert(id.to_string());
-    state.shared.rt.join(&topic(id));
+    sync_topic(&state, id);
     let me = register(&state).unwrap_or_default();
     // Без сети открываем локальную копию; правки уйдут позже.
     let _ = pull(app, id);
+    sync_topic(&state, id);
     let mut parts = vec![cached_state(&state, id)];
     // Неотправленные правки тоже часть документа.
     let pending: Vec<Vec<u8>> = with_vault(&state, |v| Ok(v.data.outbox.iter().filter(|o| o.doc == id).filter_map(|o| B64.decode(&o.update).ok()).collect()))?;
@@ -484,7 +517,7 @@ pub fn open(app: &AppHandle, id: &str) -> R<Opened> {
 pub fn close(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();
     state.shared.open.lock().remove(id);
-    state.shared.rt.leave(&topic(id));
+    sync_topic(&state, id);
 }
 
 // ——— правки и курсоры ———
@@ -507,7 +540,7 @@ pub fn push(app: &AppHandle, id: &str, update_b64: &str) -> R<()> {
     if let Some(key) = key_for(&doc, doc.epoch) {
         let ct = B64.encode(crypto::seal(&key, &aad("upd", id, doc.epoch), &update));
         if ct.len() <= realtime::MAX_BROADCAST {
-            state.shared.rt.send(&topic(id), "u", json!({ "ep": doc.epoch, "ct": ct }));
+            send(&state, id, "u", json!({ "ep": doc.epoch, "ct": ct }));
         } else {
             state.shared.flush_now.store(true, Ordering::SeqCst);
         }
@@ -531,7 +564,7 @@ pub fn awareness(app: &AppHandle, id: &str, data_b64: &str) -> R<()> {
     let key = key_for(&doc, doc.epoch).ok_or("key")?;
     let ct = B64.encode(crypto::seal(&key, &aad("aw", id, doc.epoch), &data));
     if ct.len() <= 16 * 1024 {
-        state.shared.rt.send(&topic(id), "a", json!({ "ep": doc.epoch, "ct": ct }));
+        send(&state, id, "a", json!({ "ep": doc.epoch, "ct": ct }));
     }
     Ok(())
 }
@@ -779,8 +812,10 @@ fn on_realtime(app: &AppHandle, ev: realtime::Event) {
             }
         }
         realtime::Event::Message { topic, event, payload } => {
-            let Some(id) = topic.strip_prefix("doc:") else { return };
             let state = app.state::<AppState>();
+            let found = state.shared.topics.lock().iter().find(|(_, t)| **t == topic).map(|(i, _)| i.clone());
+            let Some(id) = found else { return };
+            let id = id.as_str();
             if !state.shared.open.lock().contains(id) {
                 return;
             }
@@ -963,8 +998,10 @@ pub fn remove_member(app: &AppHandle, id: &str, device: &str) -> R<()> {
         }
         v.save().map_err(|e| e.to_string())
     })?;
-    // Сообщаем соавторам, что пора забрать новый ключ.
-    state.shared.rt.send(&topic(id), "k", json!({}));
+    // Сообщаем соавторам в старом канале, что пора забрать новый ключ,
+    // и сами переходим в канал новой эпохи.
+    send(&state, id, "k", json!({}));
+    sync_topic(&state, id);
     Ok(())
 }
 

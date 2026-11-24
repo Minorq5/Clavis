@@ -46,6 +46,8 @@
       const r = await api.unlock(pin);
       pin = "";
       if (r.ok) ondone();
+      else if (r.reason === "tpm_locked") err = t("lock.tpmLocked");
+      else if (r.reason === "guard_missing") { err = t("lock.guardMissing"); recover = true; }
       else if (r.attemptsLeft <= 0) { err = t("lock.disabled"); recover = true; }
       else err = t("lock.wrong", { n: r.attemptsLeft });
     } catch (e) {

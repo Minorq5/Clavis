@@ -143,6 +143,8 @@ pub fn confirm_recovery(app: AppHandle, state: State<AppState>) -> R<()> {
 pub struct UnlockResult {
     ok: bool,
     attempts_left: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 #[tauri::command]
@@ -158,13 +160,15 @@ pub async fn unlock(app: AppHandle, pin: String) -> R<UnlockResult> {
                 state.touch();
                 let _ = app.emit("status:changed", ());
                 let _ = app.emit("history:changed", ());
-                Ok(UnlockResult { ok: true, attempts_left: vault::MAX_PIN_FAILURES })
+                Ok(UnlockResult { ok: true, attempts_left: vault::MAX_PIN_FAILURES, reason: None })
             }
             Err((VaultError::WrongPin, left)) => {
                 let _ = vault::write_journal_locked(&state.dir, "unlock_fail", "PIN");
-                Ok(UnlockResult { ok: false, attempts_left: left })
+                Ok(UnlockResult { ok: false, attempts_left: left, reason: None })
             }
-            Err((VaultError::PinDisabled, _)) => Ok(UnlockResult { ok: false, attempts_left: 0 }),
+            Err((VaultError::PinDisabled, _)) => Ok(UnlockResult { ok: false, attempts_left: 0, reason: None }),
+            Err((VaultError::TpmLocked, left)) => Ok(UnlockResult { ok: false, attempts_left: left, reason: Some("tpm_locked") }),
+            Err((VaultError::GuardMissing, _)) => Ok(UnlockResult { ok: false, attempts_left: 0, reason: Some("guard_missing") }),
             Err((e, _)) => Err(e.to_string()),
         }
     })
